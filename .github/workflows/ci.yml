@@ -1,0 +1,125 @@
+# CI only: lint, types, tests, hygiene, IaC and container checks. NO deploy, NO terraform apply/plan, NO registry push,
+# NO cloud credentials. Third-party actions are pinned to full commit SHAs (tag in the comment).
+# NOTE: this workflow has not been executed on GitHub (the repository has no remote); it was only validated locally.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: "1.17.1"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install pinned dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-lock.txt
+          .venv/bin/python -m pip install --no-deps -e .
+      - name: Lint (ruff)
+        run: .venv/bin/ruff check .
+      - name: Type check (mypy)
+        run: .venv/bin/mypy
+      - name: Tests (complete suite)
+        run: .venv/bin/python -m pytest -q
+      - name: Hygiene (lock pins + secret patterns)
+        run: .venv/bin/python scripts/check_hygiene.py --installed
+      - name: Local monitoring demo (synthetic fault, local-only alert)
+        run: .venv/bin/python -m retail_ops demo --workdir .demo/monitoring
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: monitoring-demo-output
+          path: |
+            .demo/monitoring/dashboard.html
+            .demo/monitoring/metrics.prom
+            .demo/monitoring/logs/
+          if-no-files-found: error
+          retention-days: 7
+
+  terraform:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: platform/terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive
+      - name: init without a backend (downloads the public provider only; no AWS access)
+        run: terraform init -backend=false -input=false
+      - run: terraform validate
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.65.0
+      - run: tflint --init && tflint --format compact
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Checkov (static policy scan; no cloud calls)
+        working-directory: .
+        run: |
+          python -m venv /tmp/checkov-venv
+          /tmp/checkov-venv/bin/python -m pip install checkov==3.2.459
+          /tmp/checkov-venv/bin/checkov -d platform/terraform --framework terraform --compact --quiet
+
+  dockerfile-lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: hadolint v2.15.1 (checksum-verified binary)
+        run: |
+          curl -fsSL -o /tmp/hadolint https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64
+          echo "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507  /tmp/hadolint" | sha256sum -c -
+          chmod +x /tmp/hadolint
+          /tmp/hadolint Dockerfile
+
+  container-smoke:
+    # Builds the image on the runner and runs it locally. Nothing is pushed anywhere.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [dockerfile-lint]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build (no push)
+        run: docker build --pull=false -t retail-pipeline:ci .
+      - name: Runs as non-root
+        run: test "$(docker run --rm --entrypoint id retail-pipeline:ci -u)" = "10001"
+      - name: Healthcheck (read-only rootfs, no network, no capabilities)
+        run: |
+          docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges \
+            retail-pipeline:ci healthcheck
+      - name: Local monitoring demo inside the container (tmpfs scratch)
+        run: |
+          docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /work:rw,uid=10001,gid=10001,mode=0700 \
+            retail-pipeline:ci demo --workdir /work/monitoring

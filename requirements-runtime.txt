@@ -1,0 +1,11 @@
+# Exact runtime dependencies of the CONTAINER image (no test/lint tools). Versions only, no hashes.
+# duckdb must equal the pin in requirements-lock.txt (scripts/check_hygiene.py enforces this).
+# boto3 is needed only by the AWS task entrypoint (retail_ops.task); resolved on Python 3.13 / Linux.
+duckdb==2.0.0
+boto3==1.43.126
+botocore==1.43.126
+jmespath==1.1.0
+python-dateutil==2.9.0.post0
+s3transfer==0.19.3
+six==1.17.0
+urllib3==2.8.0

@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (git-ignored) and replace EVERY placeholder. Nothing here is a real resource.
+aws_region         = "REPLACE_WITH_REGION"
+container_image    = "REPLACE_ACCOUNT.dkr.ecr.REPLACE_REGION.amazonaws.com/retail-pipeline@sha256:REPLACE_DIGEST"
+ecr_repository_arn = "" # optional: arn:aws:ecr:REGION:ACCOUNT:repository/NAME
+subnet_ids         = ["subnet-REPLACE_ME"]
+security_group_ids = ["sg-REPLACE_ME"]
+schedule_enabled   = false # flip to true only when you are ready for runs
+alert_email        = ""    # optional
+# secret_arns = { EXAMPLE_ENV = "arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME" } # references only, never values
